@@ -6,6 +6,7 @@ import { Download } from "lucide-react";
 import { useAuthStore } from "@multica/core/auth";
 import { captureDownloadIntent } from "@multica/core/analytics";
 import { useLocale } from "../i18n";
+import { publicPath } from "../../../lib/public-path";
 import {
   ClaudeCodeLogo,
   CodexLogo,
@@ -95,7 +96,7 @@ function LandingBackdrop() {
   return (
     <div className="pointer-events-none absolute inset-0">
       <Image
-        src="/images/landing-bg.jpg"
+        src={publicPath("/images/landing-bg.jpg")}
         alt=""
         fill
         className="object-cover object-center"
@@ -109,7 +110,7 @@ function ProductImage({ alt }: { alt: string }) {
     <div>
       <div className="relative overflow-hidden border border-white/14">
         <Image
-          src="/images/landing-hero.png"
+          src={publicPath("/images/landing-hero.png")}
           alt={alt}
           width={3532}
           height={2382}

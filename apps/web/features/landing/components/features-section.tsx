@@ -19,6 +19,7 @@ import {
   UserMinus,
 } from "lucide-react";
 import { cn } from "@multica/ui/lib/utils";
+import { publicPath } from "../../../lib/public-path";
 import { ImageIcon } from "./shared";
 import { useLocale } from "../i18n";
 import type { LandingDict } from "../i18n";
@@ -1044,7 +1045,7 @@ export function FeaturesSection() {
                   {feature.visual ? (
                     <div className="relative overflow-hidden rounded-sm">
                       <Image
-                        src={feature.bgImage ?? "/images/feature-bg.jpg"}
+                        src={publicPath(feature.bgImage ?? "/images/feature-bg.jpg")}
                         alt=""
                         fill
                         className="object-cover object-center"

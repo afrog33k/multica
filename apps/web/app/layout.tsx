@@ -5,6 +5,7 @@ import { ThemeProvider } from "@/components/theme-provider";
 import { Toaster } from "@multica/ui/components/ui/sonner";
 import { cn } from "@multica/ui/lib/utils";
 import { WebProviders } from "@/components/web-providers";
+import { publicPath } from "../lib/public-path";
 import {
   DEFAULT_LOCALE,
   SUPPORTED_LOCALES,
@@ -81,8 +82,8 @@ export const metadata: Metadata = {
   description:
     "Open-source platform that turns coding agents into real teammates. Assign tasks, track progress, compound skills.",
   icons: {
-    icon: [{ url: "/favicon.svg", type: "image/svg+xml" }],
-    shortcut: ["/favicon.svg"],
+    icon: [{ url: publicPath("/favicon.svg"), type: "image/svg+xml" }],
+    shortcut: [publicPath("/favicon.svg")],
   },
   openGraph: {
     type: "website",
