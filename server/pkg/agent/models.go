@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"strings"
@@ -93,6 +94,14 @@ func ListModels(ctx context.Context, providerType, executablePath string) ([]Mod
 		return cachedDiscovery(providerType, func() ([]Model, error) {
 			return discoverOpenclawAgents(ctx, executablePath)
 		})
+	case "local-llm":
+		return cachedDiscovery(providerType+":"+executablePath, func() ([]Model, error) {
+			return discoverOpenAICompatibleModels(ctx, providerType, executablePath)
+		})
+	case "zai":
+		return cachedDiscovery(providerType+":"+executablePath, func() ([]Model, error) {
+			return discoverOpenAICompatibleModels(ctx, providerType, executablePath)
+		})
 	default:
 		return nil, fmt.Errorf("unknown agent type: %q", providerType)
 	}
@@ -132,6 +141,116 @@ func cachedDiscovery(key string, fn func() ([]Model, error)) ([]Model, error) {
 	modelCache[key] = modelCacheEntry{models: models, expiresAt: time.Now().Add(modelCacheTTL)}
 	modelCacheMu.Unlock()
 	return models, nil
+}
+
+func discoverOpenAICompatibleModels(ctx context.Context, providerType, baseURL string) ([]Model, error) {
+	baseURL = strings.TrimSpace(baseURL)
+	var apiKey string
+	switch providerType {
+	case "local-llm":
+		if baseURL == "" {
+			baseURL = envFirst(nil, "MULTICA_LOCAL_LLM_BASE_URL", "OPENAI_BASE_URL")
+		}
+		apiKey = envFirst(nil, "MULTICA_LOCAL_LLM_API_KEY", "OPENAI_API_KEY")
+	case "zai":
+		if baseURL == "" {
+			baseURL = envFirst(nil, "MULTICA_ZAI_BASE_URL", "ZAI_BASE_URL")
+		}
+		if baseURL == "" {
+			baseURL = defaultZAIBaseURL
+		}
+		apiKey = envFirst(nil, "MULTICA_ZAI_API_KEY", "ZAI_API_KEY")
+	default:
+		return nil, fmt.Errorf("unknown OpenAI-compatible provider: %q", providerType)
+	}
+
+	if baseURL != "" {
+		if models := fetchOpenAICompatibleModels(ctx, providerType, baseURL, apiKey); len(models) > 0 {
+			return models, nil
+		}
+	}
+	return fallbackOpenAICompatibleModels(providerType), nil
+}
+
+func fetchOpenAICompatibleModels(ctx context.Context, providerType, baseURL, apiKey string) []Model {
+	runCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(runCtx, http.MethodGet, modelsEndpoint(baseURL), nil)
+	if err != nil {
+		return nil
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil
+	}
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 4*1024*1024))
+	if err != nil {
+		return nil
+	}
+	var decoded struct {
+		Data []struct {
+			ID      string `json:"id"`
+			Object  string `json:"object,omitempty"`
+			OwnedBy string `json:"owned_by,omitempty"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return nil
+	}
+	models := make([]Model, 0, len(decoded.Data))
+	seen := map[string]bool{}
+	for _, item := range decoded.Data {
+		id := strings.TrimSpace(item.ID)
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		label := id
+		models = append(models, Model{ID: id, Label: label, Provider: providerType})
+	}
+	if len(models) > 0 {
+		models[0].Default = true
+	}
+	return models
+}
+
+func fallbackOpenAICompatibleModels(providerType string) []Model {
+	switch providerType {
+	case "local-llm":
+		model := strings.TrimSpace(os.Getenv("MULTICA_LOCAL_LLM_MODEL"))
+		if model == "" {
+			model = defaultLocalLLMModel
+		}
+		return []Model{
+			{ID: model, Label: model, Provider: "local-llm", Default: true},
+			{ID: "qwen3.5-27b", Label: "qwen3.5-27b", Provider: "local-llm"},
+			{ID: "claude-3-5-sonnet", Label: "claude-3-5-sonnet", Provider: "local-llm"},
+		}
+	case "zai":
+		model := strings.TrimSpace(os.Getenv("MULTICA_ZAI_MODEL"))
+		if model == "" {
+			model = strings.TrimSpace(os.Getenv("ZAI_MODEL"))
+		}
+		if model == "" {
+			model = defaultZAIModel
+		}
+		return []Model{
+			{ID: model, Label: model, Provider: "zai", Default: true},
+			{ID: "glm-4.6", Label: "GLM-4.6", Provider: "zai"},
+			{ID: "glm-4.6v", Label: "GLM-4.6V", Provider: "zai"},
+			{ID: "glm-4.5", Label: "GLM-4.5", Provider: "zai"},
+		}
+	default:
+		return nil
+	}
 }
 
 // ── Static catalogs ──

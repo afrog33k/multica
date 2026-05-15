@@ -29,16 +29,16 @@ const (
 	// avoid false positives during long tool calls but tight enough to keep
 	// stuck runs out of the operator's hair. Set MULTICA_AGENT_IDLE_WATCHDOG=0
 	// to disable.
-	DefaultAgentIdleWatchdog = 5 * time.Minute
-	DefaultRuntimeName                    = "Local Agent"
-	DefaultWorkspaceSyncInterval          = 30 * time.Second
-	DefaultHealthPort                     = 19514
-	DefaultMaxConcurrentTasks             = 20
-	DefaultGCInterval                     = 1 * time.Hour
-	DefaultGCTTL                          = 24 * time.Hour // 1 day — AI-coding issues rarely stay open long
-	DefaultGCOrphanTTL                    = 72 * time.Hour // 3 days — orphans with no meta (crashes, pre-GC leftovers)
-	DefaultGCArtifactTTL                  = 12 * time.Hour // 12h — drop regenerable artifacts on completed but still-open issues
-	DefaultAutoUpdateCheckInterval        = 6 * time.Hour  // how often the daemon polls GitHub for a newer CLI release
+	DefaultAgentIdleWatchdog       = 5 * time.Minute
+	DefaultRuntimeName             = "Local Agent"
+	DefaultWorkspaceSyncInterval   = 30 * time.Second
+	DefaultHealthPort              = 19514
+	DefaultMaxConcurrentTasks      = 20
+	DefaultGCInterval              = 1 * time.Hour
+	DefaultGCTTL                   = 24 * time.Hour // 1 day — AI-coding issues rarely stay open long
+	DefaultGCOrphanTTL             = 72 * time.Hour // 3 days — orphans with no meta (crashes, pre-GC leftovers)
+	DefaultGCArtifactTTL           = 12 * time.Hour // 12h — drop regenerable artifacts on completed but still-open issues
+	DefaultAutoUpdateCheckInterval = 6 * time.Hour  // how often the daemon polls GitHub for a newer CLI release
 )
 
 // DefaultGCArtifactPatterns lists basename matches that the GC loop treats as
@@ -59,7 +59,7 @@ type Config struct {
 	CLIVersion                     string                // multica CLI version (e.g. "0.1.13")
 	LaunchedBy                     string                // "desktop" when spawned by the Electron app, empty for standalone
 	Profile                        string                // profile name (empty = default)
-	Agents                         map[string]AgentEntry // keyed by provider: claude, codex, copilot, opencode, openclaw, hermes, gemini, pi, cursor, kimi, kiro
+	Agents                         map[string]AgentEntry // keyed by provider: claude, codex, copilot, opencode, openclaw, hermes, gemini, pi, cursor, kimi, kiro, local-llm, zai
 	WorkspacesRoot                 string                // base path for execution envs (default: ~/multica_workspaces)
 	KeepEnvAfterTask               bool                  // preserve env after task for debugging
 	HealthPort                     int                   // local HTTP port for health checks (default: 19514)
@@ -199,8 +199,14 @@ func LoadConfig(overrides Overrides) (Config, error) {
 	if e, ok := probe("MULTICA_KIRO_PATH", "kiro-cli", "MULTICA_KIRO_MODEL"); ok {
 		agents["kiro"] = e
 	}
+	if e, ok := httpAgentEntry("MULTICA_LOCAL_LLM_BASE_URL", "MULTICA_LOCAL_LLM_MODEL", "MULTICA_LOCAL_LLM_ENABLED", "http://127.0.0.1:8080/v1"); ok {
+		agents["local-llm"] = e
+	}
+	if e, ok := zaiAgentEntry(); ok {
+		agents["zai"] = e
+	}
 	if len(agents) == 0 {
-		return Config{}, fmt.Errorf("no agent CLI found: install claude, codex, copilot, opencode, openclaw, hermes, gemini, pi, cursor-agent, kimi, or kiro-cli and ensure it is on PATH")
+		return Config{}, fmt.Errorf("no agent runtime found: install claude, codex, copilot, opencode, openclaw, hermes, gemini, pi, cursor-agent, kimi, or kiro-cli on PATH, or configure MULTICA_LOCAL_LLM_BASE_URL / MULTICA_ZAI_API_KEY")
 	}
 
 	claudeArgs, err := shellArgsFromEnv("MULTICA_CLAUDE_ARGS")
@@ -493,6 +499,59 @@ func shellArgsFromEnv(name string) ([]string, error) {
 		return nil, fmt.Errorf("invalid %s: %w", name, err)
 	}
 	return args, nil
+}
+
+func httpAgentEntry(baseURLEnv, modelEnv, enabledEnv, enabledDefaultBaseURL string) (AgentEntry, bool) {
+	baseURL := strings.TrimSpace(os.Getenv(baseURLEnv))
+	enabled := truthyEnv(enabledEnv)
+	if baseURL == "" && enabled {
+		baseURL = enabledDefaultBaseURL
+	}
+	if baseURL == "" {
+		return AgentEntry{}, false
+	}
+	return AgentEntry{
+		Path:  strings.TrimRight(baseURL, "/"),
+		Model: strings.TrimSpace(os.Getenv(modelEnv)),
+	}, true
+}
+
+func zaiAgentEntry() (AgentEntry, bool) {
+	baseURL := strings.TrimSpace(os.Getenv("MULTICA_ZAI_BASE_URL"))
+	if baseURL == "" {
+		baseURL = strings.TrimSpace(os.Getenv("ZAI_BASE_URL"))
+	}
+	apiKey := strings.TrimSpace(os.Getenv("MULTICA_ZAI_API_KEY"))
+	if apiKey == "" {
+		apiKey = strings.TrimSpace(os.Getenv("ZAI_API_KEY"))
+	}
+	enabled := truthyEnv("MULTICA_ZAI_ENABLED")
+	if baseURL == "" && (apiKey != "" || enabled) {
+		baseURL = "https://api.z.ai/api/paas/v4"
+	}
+	if baseURL == "" {
+		return AgentEntry{}, false
+	}
+	model := strings.TrimSpace(os.Getenv("MULTICA_ZAI_MODEL"))
+	if model == "" {
+		model = strings.TrimSpace(os.Getenv("ZAI_MODEL"))
+	}
+	if model == "" {
+		model = "glm-4.6"
+	}
+	return AgentEntry{
+		Path:  strings.TrimRight(baseURL, "/"),
+		Model: model,
+	}, true
+}
+
+func truthyEnv(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
+	case "1", "true", "yes", "y", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 // defaultAgentCommandNames lists the command names the agent probe loop tries

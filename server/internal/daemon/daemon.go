@@ -688,7 +688,7 @@ func (d *Daemon) findRuntime(id string) *Runtime {
 func (d *Daemon) registerRuntimesForWorkspace(ctx context.Context, workspaceID string) (*RegisterResponse, error) {
 	var runtimes []map[string]string
 	for name, entry := range d.cfg.Agents {
-		version, err := detectAgentVersion(ctx, entry.Path)
+		version, err := d.agentRuntimeVersion(ctx, name, entry)
 		if err != nil {
 			d.logger.Warn("skip registering runtime", "name", name, "error", err)
 			continue
@@ -732,6 +732,17 @@ func (d *Daemon) registerRuntimesForWorkspace(ctx context.Context, workspaceID s
 		return nil, fmt.Errorf("register runtimes: empty response")
 	}
 	return resp, nil
+}
+
+func (d *Daemon) agentRuntimeVersion(ctx context.Context, name string, entry AgentEntry) (string, error) {
+	switch name {
+	case "local-llm":
+		return "openai-compatible:" + strings.TrimRight(entry.Path, "/"), nil
+	case "zai":
+		return "z.ai-openai-compatible", nil
+	default:
+		return detectAgentVersion(ctx, entry.Path)
+	}
 }
 
 // detectLocalTimezone returns an IANA zone name for the daemon host, used as
@@ -2104,7 +2115,7 @@ func gcMetaForTask(task Task) (execenv.GCMeta, bool) {
 
 func providerNeedsInlineSystemPrompt(provider string) bool {
 	switch provider {
-	case "openclaw", "kiro", "kimi":
+	case "openclaw", "kiro", "kimi", "local-llm", "zai":
 		return true
 	default:
 		return false

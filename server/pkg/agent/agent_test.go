@@ -38,6 +38,23 @@ func TestNewReturnsCopilotBackend(t *testing.T) {
 	}
 }
 
+func TestNewReturnsOpenAICompatibleBackends(t *testing.T) {
+	t.Parallel()
+	for _, provider := range []string{"local-llm", "zai"} {
+		b, err := New(provider, Config{ExecutablePath: "http://127.0.0.1:8080/v1"})
+		if err != nil {
+			t.Fatalf("New(%s) error: %v", provider, err)
+		}
+		ob, ok := b.(*openAICompatibleBackend)
+		if !ok {
+			t.Fatalf("expected *openAICompatibleBackend for %s, got %T", provider, b)
+		}
+		if ob.provider != provider {
+			t.Fatalf("backend provider = %q, want %q", ob.provider, provider)
+		}
+	}
+}
+
 func TestNewRejectsUnknownType(t *testing.T) {
 	t.Parallel()
 	_, err := New("gpt", Config{})
@@ -72,7 +89,7 @@ func TestLaunchHeaderCoversAllSupportedBackends(t *testing.T) {
 	// entry to launchHeaders in agent.go and extend this list.
 	supported := []string{
 		"claude", "codex", "copilot", "cursor", "gemini",
-		"hermes", "kimi", "kiro", "openclaw", "opencode", "pi",
+		"hermes", "kimi", "kiro", "local-llm", "openclaw", "opencode", "pi", "zai",
 	}
 	for _, t_ := range supported {
 		if header := LaunchHeader(t_); header == "" {

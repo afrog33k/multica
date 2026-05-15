@@ -356,3 +356,51 @@ func TestLoadConfig_SkipsLoginShellWhenLookPathSucceeds(t *testing.T) {
 		t.Fatalf("unexpected error stat-ing marker file: %v", err)
 	}
 }
+
+func TestLoadConfig_HTTPAgentsDoNotRequireCLI(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	t.Setenv("SHELL", "")
+	t.Setenv("MULTICA_DAEMON_ID", "11111111-1111-1111-1111-111111111111")
+	t.Setenv("MULTICA_LOCAL_LLM_BASE_URL", "http://127.0.0.1:8080/v1")
+	t.Setenv("MULTICA_LOCAL_LLM_MODEL", "pflash-qwen3.6-27b")
+	t.Setenv("MULTICA_ZAI_API_KEY", "test-key")
+	t.Setenv("MULTICA_ZAI_MODEL", "glm-test")
+
+	cfg, err := LoadConfig(Overrides{ServerURL: "http://localhost:0", WorkspacesRoot: t.TempDir()})
+	if err != nil {
+		t.Fatalf("LoadConfig error: %v", err)
+	}
+	local, ok := cfg.Agents["local-llm"]
+	if !ok {
+		t.Fatalf("local-llm not configured: %+v", cfg.Agents)
+	}
+	if local.Path != "http://127.0.0.1:8080/v1" || local.Model != "pflash-qwen3.6-27b" {
+		t.Fatalf("local-llm entry = %+v", local)
+	}
+	zai, ok := cfg.Agents["zai"]
+	if !ok {
+		t.Fatalf("zai not configured: %+v", cfg.Agents)
+	}
+	if zai.Path != "https://api.z.ai/api/paas/v4" || zai.Model != "glm-test" {
+		t.Fatalf("zai entry = %+v", zai)
+	}
+}
+
+func TestLoadConfig_LocalLLMEnabledUsesDefaultBaseURL(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	t.Setenv("SHELL", "")
+	t.Setenv("MULTICA_DAEMON_ID", "11111111-1111-1111-1111-111111111111")
+	t.Setenv("MULTICA_LOCAL_LLM_ENABLED", "true")
+
+	cfg, err := LoadConfig(Overrides{ServerURL: "http://localhost:0", WorkspacesRoot: t.TempDir()})
+	if err != nil {
+		t.Fatalf("LoadConfig error: %v", err)
+	}
+	local, ok := cfg.Agents["local-llm"]
+	if !ok {
+		t.Fatalf("local-llm not configured: %+v", cfg.Agents)
+	}
+	if local.Path != "http://127.0.0.1:8080/v1" {
+		t.Fatalf("local-llm path = %q", local.Path)
+	}
+}

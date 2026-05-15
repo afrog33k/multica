@@ -34,7 +34,8 @@ function deriveWsUrl(): string | undefined {
   if (process.env.NEXT_PUBLIC_WS_URL) return process.env.NEXT_PUBLIC_WS_URL;
   if (typeof window === "undefined") return undefined;
   const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-  return `${proto}//${window.location.host}/ws`;
+  const path = process.env.NEXT_PUBLIC_WS_PATH || "/ws";
+  return `${proto}//${window.location.host}${path.startsWith("/") ? path : `/${path}`}`;
 }
 
 // Build-time version preferred (CI sets NEXT_PUBLIC_APP_VERSION to a git tag

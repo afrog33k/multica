@@ -2,6 +2,9 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -51,6 +54,41 @@ func TestListModelsCopilotFallsBackToStatic(t *testing.T) {
 	}
 	if !ids["gpt-5.4"] || !ids["claude-sonnet-4.6"] {
 		t.Errorf("static fallback missing expected models: %+v", got)
+	}
+}
+
+func TestListModelsOpenAICompatibleFromEndpoint(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			t.Fatalf("path = %q", r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data": []map[string]string{{"id": "local-a"}, {"id": "local-b"}},
+		})
+	}))
+	defer srv.Close()
+
+	key := "local-llm:" + srv.URL
+	modelCacheMu.Lock()
+	delete(modelCache, key)
+	modelCacheMu.Unlock()
+
+	got, err := ListModels(ctx, "local-llm", srv.URL)
+	if err != nil {
+		t.Fatalf("ListModels(local-llm) error: %v", err)
+	}
+	if len(got) != 2 || got[0].ID != "local-a" || !got[0].Default {
+		t.Fatalf("models = %+v", got)
+	}
+}
+
+func TestListModelsZAIFallback(t *testing.T) {
+	t.Setenv("MULTICA_ZAI_MODEL", "glm-test")
+	models := fallbackOpenAICompatibleModels("zai")
+	if len(models) == 0 || models[0].ID != "glm-test" || !models[0].Default {
+		t.Fatalf("zai fallback = %+v", models)
 	}
 }
 
@@ -144,9 +182,9 @@ func TestInferCopilotProvider(t *testing.T) {
 		"raptor-mini":       "",
 		// negative cases: must not be misidentified as OpenAI
 		// reasoning series even though they start with `o`.
-		"opus-fake":         "",
-		"omni":              "",
-		"o":                 "",
+		"opus-fake": "",
+		"omni":      "",
+		"o":         "",
 	}
 	for id, want := range cases {
 		if got := inferCopilotProvider(id); got != want {
