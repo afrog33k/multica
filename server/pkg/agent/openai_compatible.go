@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	defaultLocalLLMModel = "pflash-qwen3.6-27b"
+	defaultLocalLLMModel = "qwen3.5-27b"
 	defaultZAIBaseURL    = "https://api.z.ai/api/paas/v4"
 	defaultZAIModel      = "glm-4.6"
 )

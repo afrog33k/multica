@@ -525,11 +525,13 @@ func zaiAgentEntry() (AgentEntry, bool) {
 	if apiKey == "" {
 		apiKey = strings.TrimSpace(os.Getenv("ZAI_API_KEY"))
 	}
-	enabled := truthyEnv("MULTICA_ZAI_ENABLED")
-	if baseURL == "" && (apiKey != "" || enabled) {
+	if baseURL == "" && apiKey != "" {
 		baseURL = "https://api.z.ai/api/paas/v4"
 	}
 	if baseURL == "" {
+		return AgentEntry{}, false
+	}
+	if apiKey == "" && strings.Contains(baseURL, "api.z.ai") {
 		return AgentEntry{}, false
 	}
 	model := strings.TrimSpace(os.Getenv("MULTICA_ZAI_MODEL"))
