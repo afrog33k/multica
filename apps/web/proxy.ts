@@ -47,8 +47,13 @@ function nextWithLocale(req: NextRequest): NextResponse {
 // edge.
 export function proxy(req: NextRequest) {
   const { pathname } = req.nextUrl;
-  const hasSession = req.cookies.has("multica_logged_in");
-  const lastSlug = req.cookies.get("last_workspace_slug")?.value;
+  const hordeAuth = process.env.NEXT_PUBLIC_HORDE_AUTH === "1";
+  const hordeWorkspaceSlug =
+    process.env.NEXT_PUBLIC_HORDE_WORKSPACE_SLUG || "horde";
+  const hasSession = hordeAuth || req.cookies.has("multica_logged_in");
+  const lastSlug =
+    req.cookies.get("last_workspace_slug")?.value ||
+    (hordeAuth ? hordeWorkspaceSlug : undefined);
 
   // --- Legacy URL redirect: /issues/... → /{slug}/issues/... ---
   // Old bookmarks and clients that hit us before the slug migration would
@@ -77,6 +82,14 @@ export function proxy(req: NextRequest) {
 
   // --- Root path: redirect logged-in users to their last workspace ---
   if (pathname === "/" && hasSession && lastSlug) {
+    const url = req.nextUrl.clone();
+    url.pathname = `/${lastSlug}/issues`;
+    return NextResponse.redirect(url);
+  }
+
+  // In Horde mode auth is owned by the Horde proxy, not Multica's email-login
+  // flow. Keep accidental /login visits inside the workspace app.
+  if (hordeAuth && pathname === "/login" && lastSlug) {
     const url = req.nextUrl.clone();
     url.pathname = `/${lastSlug}/issues`;
     return NextResponse.redirect(url);

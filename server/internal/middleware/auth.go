@@ -2,12 +2,16 @@ package middleware
 
 import (
 	"context"
+	"errors"
 	"log/slog"
+	"net"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/auth"
 	"github.com/multica-ai/multica/server/internal/util"
@@ -30,6 +34,18 @@ func uuidToString(u pgtype.UUID) string { return util.UUIDToString(u) }
 func Auth(queries *db.Queries, patCache *auth.PATCache) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if trustedProxyAuthEnabled() && trustedProxyRequest(r) {
+				user, workspaceSlug, ok := authenticateTrustedProxy(w, r, queries)
+				if !ok {
+					return
+				}
+				r.Header.Set("X-User-ID", uuidToString(user.ID))
+				r.Header.Set("X-User-Email", user.Email)
+				setTrustedProxySessionCookies(w, workspaceSlug)
+				next.ServeHTTP(w, r)
+				return
+			}
+
 			tokenString, fromCookie := extractToken(r)
 			if tokenString == "" {
 				slog.Debug("auth: no token found", "path", r.URL.Path)
@@ -124,6 +140,209 @@ func Auth(queries *db.Queries, patCache *auth.PATCache) func(http.Handler) http.
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+func trustedProxyAuthEnabled() bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv("MULTICA_TRUSTED_PROXY_AUTH")))
+	return v == "1" || v == "true" || v == "yes" || v == "on"
+}
+
+func trustedProxyRequest(r *http.Request) bool {
+	if r.Header.Get("X-Horde-Trusted") == "1" {
+		return true
+	}
+	v := strings.ToLower(strings.TrimSpace(os.Getenv("MULTICA_TRUSTED_PROXY_ALWAYS")))
+	return v == "1" || v == "true" || v == "yes" || v == "on"
+}
+
+func authenticateTrustedProxy(w http.ResponseWriter, r *http.Request, queries *db.Queries) (db.User, string, bool) {
+	var zero db.User
+	if queries == nil {
+		http.Error(w, `{"error":"trusted proxy auth requires database access"}`, http.StatusInternalServerError)
+		return zero, "", false
+	}
+	if !isLoopbackRemote(r.RemoteAddr) {
+		slog.Warn("auth: rejected trusted proxy header from non-loopback peer", "remote", r.RemoteAddr, "path", r.URL.Path)
+		http.Error(w, `{"error":"trusted proxy auth rejected"}`, http.StatusForbidden)
+		return zero, "", false
+	}
+
+	email := firstNonEmpty(
+		r.Header.Get("X-Horde-Email"),
+		os.Getenv("MULTICA_TRUSTED_PROXY_EMAIL"),
+		"horde@local.multica",
+	)
+	name := firstNonEmpty(
+		r.Header.Get("X-Horde-Name"),
+		os.Getenv("MULTICA_TRUSTED_PROXY_NAME"),
+		strings.Split(email, "@")[0],
+		"Horde User",
+	)
+	workspaceName := firstNonEmpty(
+		r.Header.Get("X-Horde-Workspace"),
+		os.Getenv("MULTICA_TRUSTED_PROXY_WORKSPACE"),
+		"Horde",
+	)
+	workspaceSlug := slugify(firstNonEmpty(
+		r.Header.Get("X-Horde-Workspace-Slug"),
+		os.Getenv("MULTICA_TRUSTED_PROXY_WORKSPACE_SLUG"),
+		workspaceName,
+		"horde",
+	))
+
+	user, err := getOrCreateTrustedProxyUser(r.Context(), queries, name, email)
+	if err != nil {
+		slog.Error("auth: trusted proxy user setup failed", "path", r.URL.Path, "error", err)
+		http.Error(w, `{"error":"trusted proxy user setup failed"}`, http.StatusInternalServerError)
+		return zero, "", false
+	}
+	if err := ensureTrustedProxyWorkspace(r.Context(), queries, user.ID, workspaceName, workspaceSlug); err != nil {
+		slog.Error("auth: trusted proxy workspace setup failed", "path", r.URL.Path, "error", err)
+		http.Error(w, `{"error":"trusted proxy workspace setup failed"}`, http.StatusInternalServerError)
+		return zero, "", false
+	}
+	return user, workspaceSlug, true
+}
+
+func getOrCreateTrustedProxyUser(ctx context.Context, queries *db.Queries, name, email string) (db.User, error) {
+	user, err := queries.GetUserByEmail(ctx, email)
+	if err == nil {
+		return user, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return db.User{}, err
+	}
+	user, err = queries.CreateUser(ctx, db.CreateUserParams{
+		Name:      name,
+		Email:     email,
+		AvatarUrl: pgtype.Text{},
+	})
+	if err == nil {
+		return user, nil
+	}
+	// Concurrent first requests can race on the unique email constraint.
+	return queries.GetUserByEmail(ctx, email)
+}
+
+func ensureTrustedProxyWorkspace(ctx context.Context, queries *db.Queries, userID pgtype.UUID, name, slug string) error {
+	workspace, err := queries.GetWorkspaceBySlug(ctx, slug)
+	if errors.Is(err, pgx.ErrNoRows) {
+		workspace, err = queries.CreateWorkspace(ctx, db.CreateWorkspaceParams{
+			Name:        name,
+			Slug:        slug,
+			Description: pgtype.Text{},
+			Context:     pgtype.Text{},
+			IssuePrefix: issuePrefix(name),
+		})
+		if err != nil {
+			workspace, err = queries.GetWorkspaceBySlug(ctx, slug)
+		}
+	}
+	if err != nil {
+		return err
+	}
+
+	_, err = queries.GetMemberByUserAndWorkspace(ctx, db.GetMemberByUserAndWorkspaceParams{
+		UserID:      userID,
+		WorkspaceID: workspace.ID,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		_, err = queries.CreateMember(ctx, db.CreateMemberParams{
+			WorkspaceID: workspace.ID,
+			UserID:      userID,
+			Role:        "owner",
+		})
+		if err != nil {
+			_, err = queries.GetMemberByUserAndWorkspace(ctx, db.GetMemberByUserAndWorkspaceParams{
+				UserID:      userID,
+				WorkspaceID: workspace.ID,
+			})
+		}
+	}
+	if err != nil {
+		return err
+	}
+	_, err = queries.MarkUserOnboarded(ctx, userID)
+	return err
+}
+
+func isLoopbackRemote(remoteAddr string) bool {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		host = remoteAddr
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func setTrustedProxySessionCookies(w http.ResponseWriter, workspaceSlug string) {
+	const oneYear = 60 * 60 * 24 * 365
+	http.SetCookie(w, &http.Cookie{
+		Name:     "multica_logged_in",
+		Value:    "1",
+		Path:     "/",
+		MaxAge:   oneYear,
+		SameSite: http.SameSiteLaxMode,
+	})
+	http.SetCookie(w, &http.Cookie{
+		Name:     "last_workspace_slug",
+		Value:    workspaceSlug,
+		Path:     "/",
+		MaxAge:   oneYear,
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if s := strings.TrimSpace(v); s != "" {
+			return s
+		}
+	}
+	return ""
+}
+
+func slugify(value string) string {
+	var b strings.Builder
+	lastDash := false
+	for _, r := range strings.ToLower(value) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			lastDash = false
+			continue
+		}
+		if !lastDash && b.Len() > 0 {
+			b.WriteByte('-')
+			lastDash = true
+		}
+	}
+	slug := strings.Trim(b.String(), "-")
+	if slug == "" {
+		return "horde"
+	}
+	if len(slug) > 48 {
+		slug = strings.Trim(slug[:48], "-")
+	}
+	if slug == "" {
+		return "horde"
+	}
+	return slug
+}
+
+func issuePrefix(name string) string {
+	var b strings.Builder
+	for _, r := range strings.ToUpper(name) {
+		if (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			if b.Len() >= 3 {
+				return b.String()
+			}
+		}
+	}
+	for b.Len() < 3 {
+		b.WriteByte('X')
+	}
+	return b.String()
 }
 
 // extractToken returns the bearer token and whether it came from a cookie.
